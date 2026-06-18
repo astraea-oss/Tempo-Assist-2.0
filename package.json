@@ -1,0 +1,36 @@
+{
+  "name": "tauri-tempo-assist",
+  "productName": "Tempo Assist",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Portable Tauri, React, and Tailwind app for reminders, alarms, and time management.",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:web": "vite --host 127.0.0.1",
+    "build:web": "tsc && vite build",
+    "build": "tauri build --no-bundle",
+    "dist:win": "npm run build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tailwindcss/forms": "^0.5.10",
+    "@tauri-apps/api": "^2.9.0",
+    "date-fns": "^4.1.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0",
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^5.2.0",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vite": "^7.3.3"
+  }
+}

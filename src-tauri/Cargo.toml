@@ -1,0 +1,19 @@
+[package]
+name = "tempo-assist"
+version = "0.1.1"
+description = "Portable Tauri reminder and alarm assistant"
+authors = ["Astraea"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tauri = { version = "2", features = [] }
+uuid = { version = "1", features = ["v4"] }

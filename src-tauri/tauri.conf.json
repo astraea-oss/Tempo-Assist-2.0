@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Tempo Assist",
+  "version": "0.1.1",
+  "identifier": "com.astraea.tempoassist",
+  "build": {
+    "beforeDevCommand": "npm run dev:web",
+    "devUrl": "http://127.0.0.1:5173",
+    "beforeBuildCommand": "npm run build:web",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Tempo Assist",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 260,
+        "minHeight": 180,
+        "decorations": false,
+        "backgroundColor": "#080b10"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": []
+  }
+}
