@@ -59,7 +59,7 @@ type CalendarMode = "daily" | "monthly" | "yearly";
 type FocusMode = "work" | "shortBreak" | "longBreak";
 
 const notificationLeadTimePresets: Array<[string, NotificationLeadTime]> = [
-  ["At time", { value: 0, unit: "minutes" }],
+  ["Due", { value: 0, unit: "minutes" }],
   ["5m", { value: 5, unit: "minutes" }],
   ["15m", { value: 15, unit: "minutes" }],
   ["30m", { value: 30, unit: "minutes" }],
@@ -161,7 +161,7 @@ function notificationLeadTimeKey(leadTime: NotificationLeadTime) {
 
 function notificationLeadTimeLabel(leadTime: NotificationLeadTime) {
   if (leadTime.value === 0) {
-    return "At time";
+    return "Due";
   }
 
   const unit = leadTime.value === 1 ? leadTime.unit.replace(/s$/, "") : leadTime.unit;
