@@ -11,6 +11,13 @@ use uuid::Uuid;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct NotificationLeadTime {
+    pub value: i64,
+    pub unit: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TempoSettings {
     pub markdown_dir: Option<String>,
     pub alarm_sound_path: Option<String>,
@@ -38,8 +45,10 @@ pub struct Reminder {
     pub notes: String,
     pub due_at: String,
     pub repeat_rule: Option<String>,
-    #[serde(default = "default_notification_offsets")]
-    pub notification_offsets: Vec<i64>,
+    #[serde(default)]
+    pub notification_lead_times: Vec<NotificationLeadTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_offsets: Option<Vec<i64>>,
     pub priority: String,
     pub status: String,
     pub tags: Vec<String>,
@@ -56,6 +65,7 @@ pub struct ReminderInput {
     pub notes: Option<String>,
     pub due_at: String,
     pub repeat_rule: Option<String>,
+    pub notification_lead_times: Option<Vec<NotificationLeadTime>>,
     pub notification_offsets: Option<Vec<i64>>,
     pub priority: String,
     pub tags: Option<Vec<String>>,
@@ -69,6 +79,7 @@ pub struct ReminderUpdate {
     pub notes: Option<String>,
     pub due_at: Option<String>,
     pub repeat_rule: Option<Option<String>>,
+    pub notification_lead_times: Option<Vec<NotificationLeadTime>>,
     pub notification_offsets: Option<Vec<i64>>,
     pub priority: Option<String>,
     pub status: Option<String>,
@@ -108,7 +119,8 @@ pub fn create_reminder_impl(input: ReminderInput) -> Result<Reminder, String> {
         notes: input.notes.unwrap_or_default().trim().to_string(),
         due_at: input.due_at,
         repeat_rule: input.repeat_rule,
-        notification_offsets: normalize_notification_offsets(input.notification_offsets),
+        notification_lead_times: normalize_notification_lead_times(input.notification_lead_times, input.notification_offsets),
+        notification_offsets: None,
         priority: input.priority,
         status: "scheduled".to_string(),
         tags: input.tags.unwrap_or_default(),
@@ -151,8 +163,10 @@ pub fn update_reminder_impl(id: &str, patch: ReminderUpdate) -> Result<Reminder,
     if let Some(repeat_rule) = patch.repeat_rule {
         reminders[index].repeat_rule = repeat_rule;
     }
-    if let Some(notification_offsets) = patch.notification_offsets {
-        reminders[index].notification_offsets = normalize_notification_offsets(Some(notification_offsets));
+    if patch.notification_lead_times.is_some() || patch.notification_offsets.is_some() {
+        reminders[index].notification_lead_times =
+            normalize_notification_lead_times(patch.notification_lead_times, patch.notification_offsets);
+        reminders[index].notification_offsets = None;
     }
     if let Some(priority) = patch.priority {
         reminders[index].priority = priority;
@@ -320,7 +334,11 @@ fn import_reminders(incoming: Vec<Reminder>) -> Result<ImportSummary, String> {
             notes: item.notes.trim().to_string(),
             due_at: item.due_at,
             repeat_rule: item.repeat_rule,
-            notification_offsets: normalize_notification_offsets(Some(item.notification_offsets)),
+            notification_lead_times: normalize_notification_lead_times(
+                Some(item.notification_lead_times),
+                item.notification_offsets,
+            ),
+            notification_offsets: None,
             priority: if item.priority.is_empty() {
                 "medium".to_string()
             } else {
@@ -378,7 +396,10 @@ fn read_reminders() -> Result<Vec<Reminder>, String> {
     }
     let mut reminders: Vec<Reminder> = serde_json::from_str(&contents).map_err(|error| error.to_string())?;
     for reminder in &mut reminders {
-        reminder.notification_offsets = normalize_notification_offsets(Some(reminder.notification_offsets.clone()));
+        reminder.notification_lead_times = normalize_notification_lead_times(
+            Some(reminder.notification_lead_times.clone()),
+            reminder.notification_offsets.take(),
+        );
     }
     Ok(reminders)
 }
@@ -550,25 +571,68 @@ fn normalize_item_type(item_type: &str) -> String {
     }
 }
 
-fn default_notification_offsets() -> Vec<i64> {
-    vec![0]
+fn default_notification_lead_times() -> Vec<NotificationLeadTime> {
+    vec![NotificationLeadTime {
+        value: 0,
+        unit: "minutes".to_string(),
+    }]
 }
 
-fn normalize_notification_offsets(offsets: Option<Vec<i64>>) -> Vec<i64> {
-    let values = offsets.unwrap_or_else(default_notification_offsets);
+fn normalize_notification_lead_times(
+    lead_times: Option<Vec<NotificationLeadTime>>,
+    offsets: Option<Vec<i64>>,
+) -> Vec<NotificationLeadTime> {
+    let values = lead_times.filter(|items| !items.is_empty()).unwrap_or_else(|| {
+        offsets
+            .unwrap_or_else(|| vec![0])
+            .into_iter()
+            .map(|offset| NotificationLeadTime {
+                value: offset,
+                unit: "minutes".to_string(),
+            })
+            .collect()
+    });
     let mut unique = BTreeSet::new();
-    for offset in values {
-        if offset >= 0 {
-            unique.insert(offset);
+    let mut normalized = Vec::new();
+
+    for lead_time in values {
+        if lead_time.value < 0 || !is_notification_unit(&lead_time.unit) {
+            continue;
+        }
+
+        let key = format!("{}:{}", lead_time.value, lead_time.unit);
+        if unique.insert(key) {
+            normalized.push(NotificationLeadTime {
+                value: lead_time.value,
+                unit: lead_time.unit,
+            });
         }
     }
 
-    let mut normalized = unique.into_iter().collect::<Vec<_>>();
-    normalized.sort_by(|a, b| b.cmp(a));
+    normalized.sort_by(|a, b| {
+        notification_unit_rank(&b.unit)
+            .cmp(&notification_unit_rank(&a.unit))
+            .then_with(|| b.value.cmp(&a.value))
+    });
     if normalized.is_empty() {
-        default_notification_offsets()
+        default_notification_lead_times()
     } else {
         normalized
+    }
+}
+
+fn is_notification_unit(unit: &str) -> bool {
+    matches!(unit, "minutes" | "hours" | "days" | "weeks" | "months")
+}
+
+fn notification_unit_rank(unit: &str) -> u8 {
+    match unit {
+        "months" => 5,
+        "weeks" => 4,
+        "days" => 3,
+        "hours" => 2,
+        "minutes" => 1,
+        _ => 0,
     }
 }
 

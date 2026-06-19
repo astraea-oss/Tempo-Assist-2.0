@@ -1,6 +1,7 @@
 import {
   addDays,
   addMinutes,
+  addMonths,
   differenceInCalendarDays,
   endOfMonth,
   endOfYear,
@@ -36,7 +37,7 @@ import {
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { reminderApi } from "./lib/reminderApi";
-import type { Reminder, ReminderItemType, TempoSettings } from "./shared/types";
+import type { NotificationLeadTime, NotificationLeadUnit, Reminder, ReminderItemType, TempoSettings } from "./shared/types";
 
 const navItems: Array<[string, LucideIcon]> = [
   ["Timeline", Bell],
@@ -50,7 +51,7 @@ type ViewName = "timeline" | "completed" | "calendar" | "focus" | "settings";
 type DuePopup = {
   item: Reminder;
   occurrenceIso: string;
-  offsetMinutes: number;
+  leadTime: NotificationLeadTime;
 };
 
 type TagFilterMode = "all" | "only" | "hide";
@@ -63,15 +64,24 @@ const quickOffsets = [
   ["1h", 60],
 ] as const;
 
-const notificationOffsetPresets = [
-  ["At time", 0],
-  ["5m", 5],
-  ["10m", 10],
-  ["15m", 15],
-  ["30m", 30],
-  ["45m", 45],
-  ["1h", 60],
+const notificationLeadTimePresets: Array<[string, NotificationLeadTime]> = [
+  ["At time", { value: 0, unit: "minutes" }],
+  ["5m", { value: 5, unit: "minutes" }],
+  ["15m", { value: 15, unit: "minutes" }],
+  ["30m", { value: 30, unit: "minutes" }],
+  ["1h", { value: 1, unit: "hours" }],
+  ["1d", { value: 1, unit: "days" }],
+  ["1w", { value: 1, unit: "weeks" }],
+  ["1mo", { value: 1, unit: "months" }],
 ] as const;
+
+const notificationLeadUnits: Array<[NotificationLeadUnit, string]> = [
+  ["minutes", "Minutes"],
+  ["hours", "Hours"],
+  ["days", "Days"],
+  ["weeks", "Weeks"],
+  ["months", "Months"],
+];
 
 const preAlertGraceMs = 60_000;
 
@@ -110,29 +120,88 @@ function combineDateTime(date: string, time: string) {
   return new Date(`${date}T${time}`).toISOString();
 }
 
-function normalizeNotificationOffsets(offsets?: number[] | null) {
-  const normalized = Array.from(
-    new Set(
-      (offsets ?? [0])
-        .map((offset) => Math.floor(Number(offset)))
-        .filter((offset) => Number.isFinite(offset) && offset >= 0),
-    ),
-  ).sort((a, b) => b - a);
+const notificationUnitRank: Record<NotificationLeadUnit, number> = {
+  months: 5,
+  weeks: 4,
+  days: 3,
+  hours: 2,
+  minutes: 1,
+};
 
-  return normalized.length > 0 ? normalized : [0];
+function isNotificationLeadUnit(unit: unknown): unit is NotificationLeadUnit {
+  return typeof unit === "string" && unit in notificationUnitRank;
 }
 
-function notificationOffsetLabel(offset: number) {
-  return offset === 0 ? "At time" : `${offset}m before`;
-}
+function normalizeNotificationLeadTimes(
+  leadTimes?: NotificationLeadTime[] | null,
+  offsets?: number[] | null,
+): NotificationLeadTime[] {
+  const source: Array<{ value: unknown; unit: unknown }> =
+    leadTimes && leadTimes.length > 0
+      ? leadTimes
+      : (offsets ?? [0]).map((offset) => ({ value: offset, unit: "minutes" as const }));
+  const seen = new Set<string>();
+  const normalized: NotificationLeadTime[] = [];
 
-function notificationTimeLabel(date: string, time: string, offset: number) {
-  const eventDate = new Date(`${date}T${time}`);
-  if (Number.isNaN(eventDate.getTime())) {
-    return notificationOffsetLabel(offset);
+  for (const leadTime of source) {
+    const value = Math.floor(Number(leadTime.value));
+    const unit = leadTime.unit;
+    if (!Number.isFinite(value) || value < 0 || !isNotificationLeadUnit(unit)) {
+      continue;
+    }
+
+    const key = notificationLeadTimeKey({ value, unit });
+    if (!seen.has(key)) {
+      seen.add(key);
+      normalized.push({ value, unit });
+    }
   }
 
-  return `${timeValue(addMinutes(eventDate, -offset))}${offset === 0 ? " due" : ""}`;
+  normalized.sort((a, b) => notificationUnitRank[b.unit] - notificationUnitRank[a.unit] || b.value - a.value);
+  return normalized.length > 0 ? normalized : [{ value: 0, unit: "minutes" }];
+}
+
+function notificationLeadTimeKey(leadTime: NotificationLeadTime) {
+  return `${leadTime.value}:${leadTime.unit}`;
+}
+
+function notificationLeadTimeLabel(leadTime: NotificationLeadTime) {
+  if (leadTime.value === 0) {
+    return "At time";
+  }
+
+  const unit = leadTime.value === 1 ? leadTime.unit.replace(/s$/, "") : leadTime.unit;
+  return `${leadTime.value} ${unit} before`;
+}
+
+function alertDateForLeadTime(occurrence: Date, leadTime: NotificationLeadTime) {
+  if (leadTime.value === 0) {
+    return occurrence;
+  }
+
+  if (leadTime.unit === "months") {
+    return addMonths(occurrence, -leadTime.value);
+  }
+  if (leadTime.unit === "weeks") {
+    return addDays(occurrence, -leadTime.value * 7);
+  }
+  if (leadTime.unit === "days") {
+    return addDays(occurrence, -leadTime.value);
+  }
+  if (leadTime.unit === "hours") {
+    return addMinutes(occurrence, -leadTime.value * 60);
+  }
+  return addMinutes(occurrence, -leadTime.value);
+}
+
+function notificationTimeLabel(date: string, time: string, leadTime: NotificationLeadTime) {
+  const eventDate = new Date(`${date}T${time}`);
+  if (Number.isNaN(eventDate.getTime())) {
+    return notificationLeadTimeLabel(leadTime);
+  }
+
+  const alertDate = alertDateForLeadTime(eventDate, leadTime);
+  return `${format(alertDate, "d MMM, HH:mm")}${leadTime.value === 0 ? " due" : ""}`;
 }
 
 function countdownLabel(dueAt: string, now: number) {
@@ -243,23 +312,24 @@ function dueOccurrence(reminder: Reminder, now: number) {
 }
 
 function dueNotification(reminder: Reminder, now: number) {
-  const offsets = normalizeNotificationOffsets(reminder.notificationOffsets);
-  const candidates: Array<{ occurrence: Date; offsetMinutes: number; alertAt: Date }> = [];
+  const leadTimes = normalizeNotificationLeadTimes(reminder.notificationLeadTimes, reminder.notificationOffsets);
+  const candidates: Array<{ occurrence: Date; leadTime: NotificationLeadTime; alertAt: Date }> = [];
 
-  if (offsets.includes(0)) {
+  const atTime = leadTimes.find((leadTime) => leadTime.value === 0);
+  if (atTime) {
     const occurrence = dueOccurrence(reminder, now);
     if (occurrence) {
-      candidates.push({ occurrence, offsetMinutes: 0, alertAt: occurrence });
+      candidates.push({ occurrence, leadTime: atTime, alertAt: occurrence });
     }
   }
 
   const next = nextOccurrence(reminder, now);
   if (next.getTime() > now) {
-    for (const offsetMinutes of offsets.filter((offset) => offset > 0)) {
-      const alertAt = addMinutes(next, -offsetMinutes);
+    for (const leadTime of leadTimes.filter((item) => item.value > 0)) {
+      const alertAt = alertDateForLeadTime(next, leadTime);
       const delay = now - alertAt.getTime();
       if (delay >= 0 && delay <= preAlertGraceMs) {
-        candidates.push({ occurrence: next, offsetMinutes, alertAt });
+        candidates.push({ occurrence: next, leadTime, alertAt });
       }
     }
   }
@@ -286,8 +356,11 @@ export function App() {
   const [date, setDate] = useState(() => dateValue(new Date()));
   const [time, setTime] = useState(() => timeValue(addMinutes(new Date(), 30)));
   const [recurrence, setRecurrence] = useState<RecurrenceValue>("none");
-  const [notificationOffsets, setNotificationOffsets] = useState<number[]>([0]);
-  const [customNotificationMinutes, setCustomNotificationMinutes] = useState("");
+  const [notificationLeadTimes, setNotificationLeadTimes] = useState<NotificationLeadTime[]>([
+    { value: 0, unit: "minutes" },
+  ]);
+  const [customNotificationValue, setCustomNotificationValue] = useState("");
+  const [customNotificationUnit, setCustomNotificationUnit] = useState<NotificationLeadUnit>("minutes");
   const [tagFilterMode, setTagFilterMode] = useState<TagFilterMode>("all");
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [nextOnlyTags, setNextOnlyTags] = useState<string[]>([]);
@@ -361,18 +434,18 @@ export function App() {
           Boolean(entry.notification),
         )
         .find(({ item, notification }) => {
-          const key = `${item.id}:${notification.occurrence.toISOString()}:${notification.offsetMinutes}`;
+          const key = `${item.id}:${notification.occurrence.toISOString()}:${notificationLeadTimeKey(notification.leadTime)}`;
           return !triggeredIds.includes(key);
         });
 
       if (due) {
-        const key = `${due.item.id}:${due.notification.occurrence.toISOString()}:${due.notification.offsetMinutes}`;
+        const key = `${due.item.id}:${due.notification.occurrence.toISOString()}:${notificationLeadTimeKey(due.notification.leadTime)}`;
         setTriggeredIds((ids) => [...ids, key]);
         playDueSound(due.item);
         setDuePopup({
           item: due.item,
           occurrenceIso: due.notification.occurrence.toISOString(),
-          offsetMinutes: due.notification.offsetMinutes,
+          leadTime: due.notification.leadTime,
         });
       }
     }, 5000);
@@ -449,7 +522,7 @@ export function App() {
       notes,
       dueAt: combineDateTime(date, time),
       repeatRule: recurrence === "none" ? null : recurrence,
-      notificationOffsets: normalizeNotificationOffsets(notificationOffsets),
+      notificationLeadTimes: normalizeNotificationLeadTimes(notificationLeadTimes),
       priority: "medium" as const,
       tags: withTypeTag(itemType, normalizeTags(tags)),
     };
@@ -471,8 +544,9 @@ export function App() {
     setNotes("");
     setTags("");
     setRecurrence("none");
-    setNotificationOffsets([0]);
-    setCustomNotificationMinutes("");
+    setNotificationLeadTimes([{ value: 0, unit: "minutes" }]);
+    setCustomNotificationValue("");
+    setCustomNotificationUnit("minutes");
     const next = addMinutes(new Date(), 30);
     setDate(dateValue(next));
     setTime(timeValue(next));
@@ -488,8 +562,9 @@ export function App() {
     setDate(dateValue(due));
     setTime(timeValue(due));
     setRecurrence((reminder.repeatRule as RecurrenceValue | null) ?? "none");
-    setNotificationOffsets(normalizeNotificationOffsets(reminder.notificationOffsets));
-    setCustomNotificationMinutes("");
+    setNotificationLeadTimes(normalizeNotificationLeadTimes(reminder.notificationLeadTimes, reminder.notificationOffsets));
+    setCustomNotificationValue("");
+    setCustomNotificationUnit("minutes");
   }
 
   async function saveSettings(patch: Partial<TempoSettings>) {
@@ -575,7 +650,7 @@ export function App() {
       notes: reminder.notes,
       dueAt: occurrenceIso,
       repeatRule: null,
-      notificationOffsets: reminder.notificationOffsets,
+      notificationLeadTimes: reminder.notificationLeadTimes,
       priority: reminder.priority,
       tags: reminder.tags,
     });
@@ -608,7 +683,7 @@ export function App() {
       return;
     }
 
-    if (duePopup.offsetMinutes > 0) {
+    if (duePopup.leadTime.value > 0) {
       setDuePopup(null);
       return;
     }
@@ -622,7 +697,7 @@ export function App() {
       return;
     }
 
-    if (duePopup.offsetMinutes > 0) {
+    if (duePopup.leadTime.value > 0) {
       setDuePopup(null);
       return;
     }
@@ -639,24 +714,27 @@ export function App() {
     setNextOnlyTags((current) => toggleTag(current, tag));
   }
 
-  function toggleNotificationOffset(offset: number) {
-    setNotificationOffsets((current) => {
-      const normalized = normalizeNotificationOffsets(current);
-      const next = normalized.includes(offset)
-        ? normalized.filter((item) => item !== offset)
-        : [...normalized, offset];
-      return normalizeNotificationOffsets(next);
+  function toggleNotificationLeadTime(leadTime: NotificationLeadTime) {
+    setNotificationLeadTimes((current) => {
+      const normalized = normalizeNotificationLeadTimes(current);
+      const key = notificationLeadTimeKey(leadTime);
+      const next = normalized.some((item) => notificationLeadTimeKey(item) === key)
+        ? normalized.filter((item) => notificationLeadTimeKey(item) !== key)
+        : [...normalized, leadTime];
+      return normalizeNotificationLeadTimes(next);
     });
   }
 
-  function addCustomNotificationOffset() {
-    const offset = Math.floor(Number(customNotificationMinutes));
-    if (!Number.isFinite(offset) || offset < 0) {
+  function addCustomNotificationLeadTime() {
+    const value = Math.floor(Number(customNotificationValue));
+    if (!Number.isFinite(value) || value < 0) {
       return;
     }
 
-    setNotificationOffsets((current) => normalizeNotificationOffsets([...current, offset]));
-    setCustomNotificationMinutes("");
+    setNotificationLeadTimes((current) =>
+      normalizeNotificationLeadTimes([...current, { value, unit: customNotificationUnit }]),
+    );
+    setCustomNotificationValue("");
   }
 
   function chooseFocusMode(mode: FocusMode) {
@@ -905,14 +983,16 @@ export function App() {
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-xs font-medium text-slate-300">Notifications</p>
                   <p className="text-[11px] text-slate-500">
-                    {normalizeNotificationOffsets(notificationOffsets).length} alert
-                    {normalizeNotificationOffsets(notificationOffsets).length === 1 ? "" : "s"}
+                    {normalizeNotificationLeadTimes(notificationLeadTimes).length} alert
+                    {normalizeNotificationLeadTimes(notificationLeadTimes).length === 1 ? "" : "s"}
                   </p>
                 </div>
 
-                <div className="mt-2 grid grid-cols-3 gap-1.5">
-                  {notificationOffsetPresets.map(([label, offset]) => {
-                    const selected = normalizeNotificationOffsets(notificationOffsets).includes(offset);
+                <div className="mt-2 grid grid-cols-4 gap-1.5">
+                  {notificationLeadTimePresets.map(([label, leadTime]) => {
+                    const selected = normalizeNotificationLeadTimes(notificationLeadTimes).some(
+                      (item) => notificationLeadTimeKey(item) === notificationLeadTimeKey(leadTime),
+                    );
                     return (
                       <button
                         className={`rounded-md border px-2 py-1.5 text-xs ${
@@ -921,7 +1001,7 @@ export function App() {
                             : "border-white/10 text-slate-400 hover:bg-white/10 hover:text-white"
                         }`}
                         key={label}
-                        onClick={() => toggleNotificationOffset(offset)}
+                        onClick={() => toggleNotificationLeadTime(leadTime)}
                         type="button"
                       >
                         {label}
@@ -930,24 +1010,35 @@ export function App() {
                   })}
                 </div>
 
-                <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                <div className="mt-2 grid grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_auto] gap-2">
                   <input
                     className="min-w-0 rounded-md border-white/10 bg-slate-950 px-3 py-2 text-xs text-white placeholder:text-slate-600"
                     min={0}
-                    onChange={(event) => setCustomNotificationMinutes(event.target.value)}
+                    onChange={(event) => setCustomNotificationValue(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter") {
                         event.preventDefault();
-                        addCustomNotificationOffset();
+                        addCustomNotificationLeadTime();
                       }
                     }}
-                    placeholder="Minutes before"
+                    placeholder="Amount"
                     type="number"
-                    value={customNotificationMinutes}
+                    value={customNotificationValue}
                   />
+                  <select
+                    className="min-w-0 rounded-md border-white/10 bg-slate-950 px-2 py-2 text-xs text-white"
+                    onChange={(event) => setCustomNotificationUnit(event.target.value as NotificationLeadUnit)}
+                    value={customNotificationUnit}
+                  >
+                    {notificationLeadUnits.map(([value, label]) => (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
                   <button
                     className="rounded-md border border-cyan-300/30 px-3 py-2 text-xs text-cyan-100 hover:bg-cyan-300/10"
-                    onClick={addCustomNotificationOffset}
+                    onClick={addCustomNotificationLeadTime}
                     type="button"
                   >
                     Add
@@ -955,15 +1046,15 @@ export function App() {
                 </div>
 
                 <div className="mt-2 flex flex-wrap gap-1.5">
-                  {normalizeNotificationOffsets(notificationOffsets).map((offset) => (
+                  {normalizeNotificationLeadTimes(notificationLeadTimes).map((leadTime) => (
                     <button
                       className="inline-flex items-center gap-1 rounded border border-white/10 bg-slate-950 px-2 py-1 text-[11px] text-slate-300 hover:bg-white/10"
-                      key={offset}
-                      onClick={() => toggleNotificationOffset(offset)}
-                      title={`Remove ${notificationOffsetLabel(offset)}`}
+                      key={notificationLeadTimeKey(leadTime)}
+                      onClick={() => toggleNotificationLeadTime(leadTime)}
+                      title={`Remove ${notificationLeadTimeLabel(leadTime)}`}
                       type="button"
                     >
-                      <span>{notificationTimeLabel(date, time, offset)}</span>
+                      <span>{notificationTimeLabel(date, time, leadTime)}</span>
                       <X size={12} />
                     </button>
                   ))}
@@ -1594,7 +1685,7 @@ function DueAlert({
   popup: DuePopup;
 }) {
   const isAlarm = popup.item.itemType === "alarm";
-  const isPreAlert = popup.offsetMinutes > 0;
+  const isPreAlert = popup.leadTime.value > 0;
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-6">
@@ -1605,7 +1696,7 @@ function DueAlert({
           </div>
           <div className="min-w-0">
             <p className="text-xs uppercase tracking-[0.14em] text-cyan-300">
-              {isPreAlert ? `${popup.offsetMinutes}m before` : isAlarm ? "Alarm" : "Reminder"}
+              {isPreAlert ? notificationLeadTimeLabel(popup.leadTime) : isAlarm ? "Alarm" : "Reminder"}
             </p>
             <h2 className="truncate text-xl font-semibold">{popup.item.title}</h2>
           </div>
@@ -1758,7 +1849,7 @@ function ScheduleList({
       ) : (
         items.map((reminder) => {
           const displayDueAt = now && mode === "active" ? nextOccurrence(reminder, now).toISOString() : reminder.dueAt;
-          const alertCount = normalizeNotificationOffsets(reminder.notificationOffsets).length;
+          const alertCount = normalizeNotificationLeadTimes(reminder.notificationLeadTimes, reminder.notificationOffsets).length;
           return (
           <article
             className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 rounded-md border border-white/10 bg-white/[0.035] px-3 py-2 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center"

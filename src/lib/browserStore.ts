@@ -1,4 +1,4 @@
-import type { ImportSummary, Reminder, ReminderInput, ReminderUpdate } from "../shared/types";
+import type { ImportSummary, NotificationLeadTime, NotificationLeadUnit, Reminder, ReminderInput, ReminderUpdate } from "../shared/types";
 
 const storageKey = "tempo-forge-reminders";
 
@@ -10,16 +10,42 @@ function write(reminders: Reminder[]) {
   localStorage.setItem(storageKey, JSON.stringify(reminders));
 }
 
-function normalizeNotificationOffsets(offsets?: number[]) {
-  const normalized = Array.from(
-    new Set(
-      (offsets ?? [0])
-        .map((offset) => Math.floor(Number(offset)))
-        .filter((offset) => Number.isFinite(offset) && offset >= 0),
-    ),
-  ).sort((a, b) => b - a);
+const notificationUnitRank: Record<NotificationLeadUnit, number> = {
+  months: 5,
+  weeks: 4,
+  days: 3,
+  hours: 2,
+  minutes: 1,
+};
 
-  return normalized.length > 0 ? normalized : [0];
+function isNotificationLeadUnit(unit: unknown): unit is NotificationLeadUnit {
+  return typeof unit === "string" && unit in notificationUnitRank;
+}
+
+function normalizeNotificationLeadTimes(leadTimes?: NotificationLeadTime[], offsets?: number[]): NotificationLeadTime[] {
+  const source: Array<{ value: unknown; unit: unknown }> =
+    leadTimes && leadTimes.length > 0
+      ? leadTimes
+      : (offsets ?? [0]).map((offset) => ({ value: offset, unit: "minutes" as const }));
+  const seen = new Set<string>();
+  const normalized: NotificationLeadTime[] = [];
+
+  for (const leadTime of source) {
+    const value = Math.floor(Number(leadTime.value));
+    const unit = leadTime.unit;
+    if (!Number.isFinite(value) || value < 0 || !isNotificationLeadUnit(unit)) {
+      continue;
+    }
+
+    const key = `${value}:${unit}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      normalized.push({ value, unit });
+    }
+  }
+
+  normalized.sort((a, b) => notificationUnitRank[b.unit] - notificationUnitRank[a.unit] || b.value - a.value);
+  return normalized.length > 0 ? normalized : [{ value: 0, unit: "minutes" }];
 }
 
 export const browserStore = {
@@ -27,7 +53,7 @@ export const browserStore = {
     return read()
       .map((reminder) => ({
         ...reminder,
-        notificationOffsets: normalizeNotificationOffsets(reminder.notificationOffsets),
+        notificationLeadTimes: normalizeNotificationLeadTimes(reminder.notificationLeadTimes, reminder.notificationOffsets),
       }))
       .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
   },
@@ -40,7 +66,7 @@ export const browserStore = {
       notes: input.notes ?? "",
       dueAt: input.dueAt,
       repeatRule: input.repeatRule ?? null,
-      notificationOffsets: normalizeNotificationOffsets(input.notificationOffsets),
+      notificationLeadTimes: normalizeNotificationLeadTimes(input.notificationLeadTimes, input.notificationOffsets),
       priority: input.priority,
       status: "scheduled",
       tags: input.tags ?? [],
@@ -60,7 +86,10 @@ export const browserStore = {
     }
 
     Object.assign(reminder, patch, {
-      notificationOffsets: normalizeNotificationOffsets(patch.notificationOffsets ?? reminder.notificationOffsets),
+      notificationLeadTimes: normalizeNotificationLeadTimes(
+        patch.notificationLeadTimes ?? reminder.notificationLeadTimes,
+        patch.notificationOffsets ?? reminder.notificationOffsets,
+      ),
       updatedAt: new Date().toISOString(),
     });
     write(reminders);
@@ -86,14 +115,14 @@ export const browserStore = {
         current[existingIndex] = {
           ...current[existingIndex],
           ...reminder,
-          notificationOffsets: normalizeNotificationOffsets(reminder.notificationOffsets),
+          notificationLeadTimes: normalizeNotificationLeadTimes(reminder.notificationLeadTimes, reminder.notificationOffsets),
           markdownPath: "",
         };
         updated += 1;
       } else {
         current.push({
           ...reminder,
-          notificationOffsets: normalizeNotificationOffsets(reminder.notificationOffsets),
+          notificationLeadTimes: normalizeNotificationLeadTimes(reminder.notificationLeadTimes, reminder.notificationOffsets),
           markdownPath: "",
         });
         imported += 1;

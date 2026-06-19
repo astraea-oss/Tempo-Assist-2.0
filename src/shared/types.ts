@@ -1,6 +1,12 @@
 export type ReminderPriority = "low" | "medium" | "high";
 export type ReminderStatus = "scheduled" | "snoozed" | "done" | "missed";
 export type ReminderItemType = "reminder" | "alarm";
+export type NotificationLeadUnit = "minutes" | "hours" | "days" | "weeks" | "months";
+
+export interface NotificationLeadTime {
+  value: number;
+  unit: NotificationLeadUnit;
+}
 
 export interface TempoSettings {
   markdownDir: string | null;
@@ -17,7 +23,8 @@ export interface Reminder {
   notes: string;
   dueAt: string;
   repeatRule: string | null;
-  notificationOffsets: number[];
+  notificationLeadTimes: NotificationLeadTime[];
+  notificationOffsets?: number[];
   priority: ReminderPriority;
   status: ReminderStatus;
   tags: string[];
@@ -32,13 +39,14 @@ export interface ReminderInput {
   notes?: string;
   dueAt: string;
   repeatRule?: string | null;
+  notificationLeadTimes?: NotificationLeadTime[];
   notificationOffsets?: number[];
   priority: ReminderPriority;
   tags?: string[];
 }
 
 export type ReminderUpdate = Partial<
-  Pick<Reminder, "itemType" | "title" | "notes" | "dueAt" | "repeatRule" | "notificationOffsets" | "priority" | "status" | "tags">
+  Pick<Reminder, "itemType" | "title" | "notes" | "dueAt" | "repeatRule" | "notificationLeadTimes" | "notificationOffsets" | "priority" | "status" | "tags">
 >;
 
 export interface TempoBackup {
