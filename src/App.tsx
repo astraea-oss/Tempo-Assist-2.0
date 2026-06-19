@@ -58,12 +58,6 @@ type TagFilterMode = "all" | "only" | "hide";
 type CalendarMode = "daily" | "monthly" | "yearly";
 type FocusMode = "work" | "shortBreak" | "longBreak";
 
-const quickOffsets = [
-  ["10m", 10],
-  ["30m", 30],
-  ["1h", 60],
-] as const;
-
 const notificationLeadTimePresets: Array<[string, NotificationLeadTime]> = [
   ["At time", { value: 0, unit: "minutes" }],
   ["5m", { value: 5, unit: "minutes" }],
@@ -503,12 +497,6 @@ export function App() {
     () => filterByTags(reminders, tagFilterMode, selectedTags),
     [reminders, tagFilterMode, selectedTags],
   );
-
-  function setQuickTime(offset: number | null) {
-    const next = offset === null ? new Date(new Date().setHours(21, 0, 0, 0)) : addMinutes(new Date(), offset);
-    setDate(dateValue(next));
-    setTime(timeValue(next));
-  }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -964,19 +952,6 @@ export function App() {
                     value={time}
                   />
                 </label>
-              </div>
-
-              <div className="mt-3 grid grid-cols-3 gap-2">
-                {quickOffsets.map(([label, offset]) => (
-                  <button
-                    className="rounded-md border border-white/10 px-2 py-2 text-xs text-slate-300 hover:bg-white/10 hover:text-white"
-                    key={label}
-                    onClick={() => setQuickTime(offset)}
-                    type="button"
-                  >
-                    {label}
-                  </button>
-                ))}
               </div>
 
               <div className="mt-3 rounded-md border border-white/10 bg-white/[0.025] p-2">
