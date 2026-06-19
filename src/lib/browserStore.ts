@@ -10,9 +10,26 @@ function write(reminders: Reminder[]) {
   localStorage.setItem(storageKey, JSON.stringify(reminders));
 }
 
+function normalizeNotificationOffsets(offsets?: number[]) {
+  const normalized = Array.from(
+    new Set(
+      (offsets ?? [0])
+        .map((offset) => Math.floor(Number(offset)))
+        .filter((offset) => Number.isFinite(offset) && offset >= 0),
+    ),
+  ).sort((a, b) => b - a);
+
+  return normalized.length > 0 ? normalized : [0];
+}
+
 export const browserStore = {
   async list() {
-    return read().sort((a, b) => a.dueAt.localeCompare(b.dueAt));
+    return read()
+      .map((reminder) => ({
+        ...reminder,
+        notificationOffsets: normalizeNotificationOffsets(reminder.notificationOffsets),
+      }))
+      .sort((a, b) => a.dueAt.localeCompare(b.dueAt));
   },
   async create(input: ReminderInput) {
     const now = new Date().toISOString();
@@ -23,6 +40,7 @@ export const browserStore = {
       notes: input.notes ?? "",
       dueAt: input.dueAt,
       repeatRule: input.repeatRule ?? null,
+      notificationOffsets: normalizeNotificationOffsets(input.notificationOffsets),
       priority: input.priority,
       status: "scheduled",
       tags: input.tags ?? [],
@@ -41,7 +59,10 @@ export const browserStore = {
       throw new Error(`Reminder not found: ${id}`);
     }
 
-    Object.assign(reminder, patch, { updatedAt: new Date().toISOString() });
+    Object.assign(reminder, patch, {
+      notificationOffsets: normalizeNotificationOffsets(patch.notificationOffsets ?? reminder.notificationOffsets),
+      updatedAt: new Date().toISOString(),
+    });
     write(reminders);
     return reminder;
   },
@@ -62,10 +83,19 @@ export const browserStore = {
 
       const existingIndex = current.findIndex((item) => item.id === reminder.id);
       if (existingIndex >= 0) {
-        current[existingIndex] = { ...current[existingIndex], ...reminder, markdownPath: "" };
+        current[existingIndex] = {
+          ...current[existingIndex],
+          ...reminder,
+          notificationOffsets: normalizeNotificationOffsets(reminder.notificationOffsets),
+          markdownPath: "",
+        };
         updated += 1;
       } else {
-        current.push({ ...reminder, markdownPath: "" });
+        current.push({
+          ...reminder,
+          notificationOffsets: normalizeNotificationOffsets(reminder.notificationOffsets),
+          markdownPath: "",
+        });
         imported += 1;
       }
     }

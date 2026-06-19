@@ -17,6 +17,7 @@ export interface Reminder {
   notes: string;
   dueAt: string;
   repeatRule: string | null;
+  notificationOffsets: number[];
   priority: ReminderPriority;
   status: ReminderStatus;
   tags: string[];
@@ -31,12 +32,13 @@ export interface ReminderInput {
   notes?: string;
   dueAt: string;
   repeatRule?: string | null;
+  notificationOffsets?: number[];
   priority: ReminderPriority;
   tags?: string[];
 }
 
 export type ReminderUpdate = Partial<
-  Pick<Reminder, "itemType" | "title" | "notes" | "dueAt" | "repeatRule" | "priority" | "status" | "tags">
+  Pick<Reminder, "itemType" | "title" | "notes" | "dueAt" | "repeatRule" | "notificationOffsets" | "priority" | "status" | "tags">
 >;
 
 export interface TempoBackup {

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -37,6 +38,8 @@ pub struct Reminder {
     pub notes: String,
     pub due_at: String,
     pub repeat_rule: Option<String>,
+    #[serde(default = "default_notification_offsets")]
+    pub notification_offsets: Vec<i64>,
     pub priority: String,
     pub status: String,
     pub tags: Vec<String>,
@@ -53,6 +56,7 @@ pub struct ReminderInput {
     pub notes: Option<String>,
     pub due_at: String,
     pub repeat_rule: Option<String>,
+    pub notification_offsets: Option<Vec<i64>>,
     pub priority: String,
     pub tags: Option<Vec<String>>,
 }
@@ -65,6 +69,7 @@ pub struct ReminderUpdate {
     pub notes: Option<String>,
     pub due_at: Option<String>,
     pub repeat_rule: Option<Option<String>>,
+    pub notification_offsets: Option<Vec<i64>>,
     pub priority: Option<String>,
     pub status: Option<String>,
     pub tags: Option<Vec<String>>,
@@ -103,6 +108,7 @@ pub fn create_reminder_impl(input: ReminderInput) -> Result<Reminder, String> {
         notes: input.notes.unwrap_or_default().trim().to_string(),
         due_at: input.due_at,
         repeat_rule: input.repeat_rule,
+        notification_offsets: normalize_notification_offsets(input.notification_offsets),
         priority: input.priority,
         status: "scheduled".to_string(),
         tags: input.tags.unwrap_or_default(),
@@ -144,6 +150,9 @@ pub fn update_reminder_impl(id: &str, patch: ReminderUpdate) -> Result<Reminder,
     }
     if let Some(repeat_rule) = patch.repeat_rule {
         reminders[index].repeat_rule = repeat_rule;
+    }
+    if let Some(notification_offsets) = patch.notification_offsets {
+        reminders[index].notification_offsets = normalize_notification_offsets(Some(notification_offsets));
     }
     if let Some(priority) = patch.priority {
         reminders[index].priority = priority;
@@ -311,6 +320,7 @@ fn import_reminders(incoming: Vec<Reminder>) -> Result<ImportSummary, String> {
             notes: item.notes.trim().to_string(),
             due_at: item.due_at,
             repeat_rule: item.repeat_rule,
+            notification_offsets: normalize_notification_offsets(Some(item.notification_offsets)),
             priority: if item.priority.is_empty() {
                 "medium".to_string()
             } else {
@@ -366,7 +376,11 @@ fn read_reminders() -> Result<Vec<Reminder>, String> {
     if contents.trim().is_empty() {
         return Ok(Vec::new());
     }
-    serde_json::from_str(&contents).map_err(|error| error.to_string())
+    let mut reminders: Vec<Reminder> = serde_json::from_str(&contents).map_err(|error| error.to_string())?;
+    for reminder in &mut reminders {
+        reminder.notification_offsets = normalize_notification_offsets(Some(reminder.notification_offsets.clone()));
+    }
+    Ok(reminders)
 }
 
 fn write_reminders(reminders: &[Reminder]) -> Result<(), String> {
@@ -533,6 +547,28 @@ fn normalize_item_type(item_type: &str) -> String {
         "alarm".to_string()
     } else {
         "reminder".to_string()
+    }
+}
+
+fn default_notification_offsets() -> Vec<i64> {
+    vec![0]
+}
+
+fn normalize_notification_offsets(offsets: Option<Vec<i64>>) -> Vec<i64> {
+    let values = offsets.unwrap_or_else(default_notification_offsets);
+    let mut unique = BTreeSet::new();
+    for offset in values {
+        if offset >= 0 {
+            unique.insert(offset);
+        }
+    }
+
+    let mut normalized = unique.into_iter().collect::<Vec<_>>();
+    normalized.sort_by(|a, b| b.cmp(a));
+    if normalized.is_empty() {
+        default_notification_offsets()
+    } else {
+        normalized
     }
 }
 

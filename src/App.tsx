@@ -30,6 +30,7 @@ import {
   Plus,
   Settings,
   TimerReset,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -49,6 +50,7 @@ type ViewName = "timeline" | "completed" | "calendar" | "focus" | "settings";
 type DuePopup = {
   item: Reminder;
   occurrenceIso: string;
+  offsetMinutes: number;
 };
 
 type TagFilterMode = "all" | "only" | "hide";
@@ -60,6 +62,18 @@ const quickOffsets = [
   ["30m", 30],
   ["1h", 60],
 ] as const;
+
+const notificationOffsetPresets = [
+  ["At time", 0],
+  ["5m", 5],
+  ["10m", 10],
+  ["15m", 15],
+  ["30m", 30],
+  ["45m", 45],
+  ["1h", 60],
+] as const;
+
+const preAlertGraceMs = 60_000;
 
 const recurrenceOptions = [
   ["none", "No repeat"],
@@ -94,6 +108,31 @@ function timeValue(date: Date) {
 
 function combineDateTime(date: string, time: string) {
   return new Date(`${date}T${time}`).toISOString();
+}
+
+function normalizeNotificationOffsets(offsets?: number[] | null) {
+  const normalized = Array.from(
+    new Set(
+      (offsets ?? [0])
+        .map((offset) => Math.floor(Number(offset)))
+        .filter((offset) => Number.isFinite(offset) && offset >= 0),
+    ),
+  ).sort((a, b) => b - a);
+
+  return normalized.length > 0 ? normalized : [0];
+}
+
+function notificationOffsetLabel(offset: number) {
+  return offset === 0 ? "At time" : `${offset}m before`;
+}
+
+function notificationTimeLabel(date: string, time: string, offset: number) {
+  const eventDate = new Date(`${date}T${time}`);
+  if (Number.isNaN(eventDate.getTime())) {
+    return notificationOffsetLabel(offset);
+  }
+
+  return `${timeValue(addMinutes(eventDate, -offset))}${offset === 0 ? " due" : ""}`;
 }
 
 function countdownLabel(dueAt: string, now: number) {
@@ -203,6 +242,31 @@ function dueOccurrence(reminder: Reminder, now: number) {
   return occurrence;
 }
 
+function dueNotification(reminder: Reminder, now: number) {
+  const offsets = normalizeNotificationOffsets(reminder.notificationOffsets);
+  const candidates: Array<{ occurrence: Date; offsetMinutes: number; alertAt: Date }> = [];
+
+  if (offsets.includes(0)) {
+    const occurrence = dueOccurrence(reminder, now);
+    if (occurrence) {
+      candidates.push({ occurrence, offsetMinutes: 0, alertAt: occurrence });
+    }
+  }
+
+  const next = nextOccurrence(reminder, now);
+  if (next.getTime() > now) {
+    for (const offsetMinutes of offsets.filter((offset) => offset > 0)) {
+      const alertAt = addMinutes(next, -offsetMinutes);
+      const delay = now - alertAt.getTime();
+      if (delay >= 0 && delay <= preAlertGraceMs) {
+        candidates.push({ occurrence: next, offsetMinutes, alertAt });
+      }
+    }
+  }
+
+  return candidates.sort((a, b) => a.alertAt.getTime() - b.alertAt.getTime())[0] ?? null;
+}
+
 export function App() {
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [settings, setSettings] = useState<TempoSettings>({
@@ -222,6 +286,8 @@ export function App() {
   const [date, setDate] = useState(() => dateValue(new Date()));
   const [time, setTime] = useState(() => timeValue(addMinutes(new Date(), 30)));
   const [recurrence, setRecurrence] = useState<RecurrenceValue>("none");
+  const [notificationOffsets, setNotificationOffsets] = useState<number[]>([0]);
+  const [customNotificationMinutes, setCustomNotificationMinutes] = useState("");
   const [tagFilterMode, setTagFilterMode] = useState<TagFilterMode>("all");
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [nextOnlyTags, setNextOnlyTags] = useState<string[]>([]);
@@ -284,27 +350,35 @@ export function App() {
   useEffect(() => {
     const timer = window.setInterval(() => {
       const now = Date.now();
+      if (duePopup) {
+        return;
+      }
+
       const due = reminders
         .filter((item) => item.status === "scheduled" || item.status === "snoozed")
-        .map((item) => ({ item, occurrence: dueOccurrence(item, now) }))
-        .filter((entry): entry is { item: Reminder; occurrence: Date } => Boolean(entry.occurrence))
-        .find(({ item, occurrence }) => !triggeredIds.includes(`${item.id}:${occurrence.toISOString()}`));
+        .map((item) => ({ item, notification: dueNotification(item, now) }))
+        .filter((entry): entry is { item: Reminder; notification: NonNullable<ReturnType<typeof dueNotification>> } =>
+          Boolean(entry.notification),
+        )
+        .find(({ item, notification }) => {
+          const key = `${item.id}:${notification.occurrence.toISOString()}:${notification.offsetMinutes}`;
+          return !triggeredIds.includes(key);
+        });
 
       if (due) {
-        const key = `${due.item.id}:${due.occurrence.toISOString()}`;
+        const key = `${due.item.id}:${due.notification.occurrence.toISOString()}:${due.notification.offsetMinutes}`;
         setTriggeredIds((ids) => [...ids, key]);
-        setDuePopup((current) => {
-          if (!current) {
-            playDueSound(due.item);
-            return { item: due.item, occurrenceIso: due.occurrence.toISOString() };
-          }
-          return current;
+        playDueSound(due.item);
+        setDuePopup({
+          item: due.item,
+          occurrenceIso: due.notification.occurrence.toISOString(),
+          offsetMinutes: due.notification.offsetMinutes,
         });
       }
     }, 5000);
 
     return () => window.clearInterval(timer);
-  }, [reminders, settings, triggeredIds]);
+  }, [duePopup, reminders, settings, triggeredIds]);
 
   useEffect(() => {
     reminderApi.notifications.sync(reminders).catch((error) => {
@@ -375,6 +449,7 @@ export function App() {
       notes,
       dueAt: combineDateTime(date, time),
       repeatRule: recurrence === "none" ? null : recurrence,
+      notificationOffsets: normalizeNotificationOffsets(notificationOffsets),
       priority: "medium" as const,
       tags: withTypeTag(itemType, normalizeTags(tags)),
     };
@@ -396,6 +471,8 @@ export function App() {
     setNotes("");
     setTags("");
     setRecurrence("none");
+    setNotificationOffsets([0]);
+    setCustomNotificationMinutes("");
     const next = addMinutes(new Date(), 30);
     setDate(dateValue(next));
     setTime(timeValue(next));
@@ -411,6 +488,8 @@ export function App() {
     setDate(dateValue(due));
     setTime(timeValue(due));
     setRecurrence((reminder.repeatRule as RecurrenceValue | null) ?? "none");
+    setNotificationOffsets(normalizeNotificationOffsets(reminder.notificationOffsets));
+    setCustomNotificationMinutes("");
   }
 
   async function saveSettings(patch: Partial<TempoSettings>) {
@@ -496,6 +575,7 @@ export function App() {
       notes: reminder.notes,
       dueAt: occurrenceIso,
       repeatRule: null,
+      notificationOffsets: reminder.notificationOffsets,
       priority: reminder.priority,
       tags: reminder.tags,
     });
@@ -528,12 +608,22 @@ export function App() {
       return;
     }
 
+    if (duePopup.offsetMinutes > 0) {
+      setDuePopup(null);
+      return;
+    }
+
     await completeOccurrence(duePopup.item, duePopup.occurrenceIso);
     setDuePopup(null);
   }
 
   async function snoozeDue() {
     if (!duePopup) {
+      return;
+    }
+
+    if (duePopup.offsetMinutes > 0) {
+      setDuePopup(null);
       return;
     }
 
@@ -547,6 +637,26 @@ export function App() {
 
   function toggleNextOnlyTag(tag: string) {
     setNextOnlyTags((current) => toggleTag(current, tag));
+  }
+
+  function toggleNotificationOffset(offset: number) {
+    setNotificationOffsets((current) => {
+      const normalized = normalizeNotificationOffsets(current);
+      const next = normalized.includes(offset)
+        ? normalized.filter((item) => item !== offset)
+        : [...normalized, offset];
+      return normalizeNotificationOffsets(next);
+    });
+  }
+
+  function addCustomNotificationOffset() {
+    const offset = Math.floor(Number(customNotificationMinutes));
+    if (!Number.isFinite(offset) || offset < 0) {
+      return;
+    }
+
+    setNotificationOffsets((current) => normalizeNotificationOffsets([...current, offset]));
+    setCustomNotificationMinutes("");
   }
 
   function chooseFocusMode(mode: FocusMode) {
@@ -789,6 +899,75 @@ export function App() {
                     {label}
                   </button>
                 ))}
+              </div>
+
+              <div className="mt-3 rounded-md border border-white/10 bg-white/[0.025] p-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-slate-300">Notifications</p>
+                  <p className="text-[11px] text-slate-500">
+                    {normalizeNotificationOffsets(notificationOffsets).length} alert
+                    {normalizeNotificationOffsets(notificationOffsets).length === 1 ? "" : "s"}
+                  </p>
+                </div>
+
+                <div className="mt-2 grid grid-cols-3 gap-1.5">
+                  {notificationOffsetPresets.map(([label, offset]) => {
+                    const selected = normalizeNotificationOffsets(notificationOffsets).includes(offset);
+                    return (
+                      <button
+                        className={`rounded-md border px-2 py-1.5 text-xs ${
+                          selected
+                            ? "border-cyan-300/50 bg-cyan-300/15 text-cyan-100"
+                            : "border-white/10 text-slate-400 hover:bg-white/10 hover:text-white"
+                        }`}
+                        key={label}
+                        onClick={() => toggleNotificationOffset(offset)}
+                        type="button"
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] gap-2">
+                  <input
+                    className="min-w-0 rounded-md border-white/10 bg-slate-950 px-3 py-2 text-xs text-white placeholder:text-slate-600"
+                    min={0}
+                    onChange={(event) => setCustomNotificationMinutes(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addCustomNotificationOffset();
+                      }
+                    }}
+                    placeholder="Minutes before"
+                    type="number"
+                    value={customNotificationMinutes}
+                  />
+                  <button
+                    className="rounded-md border border-cyan-300/30 px-3 py-2 text-xs text-cyan-100 hover:bg-cyan-300/10"
+                    onClick={addCustomNotificationOffset}
+                    type="button"
+                  >
+                    Add
+                  </button>
+                </div>
+
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {normalizeNotificationOffsets(notificationOffsets).map((offset) => (
+                    <button
+                      className="inline-flex items-center gap-1 rounded border border-white/10 bg-slate-950 px-2 py-1 text-[11px] text-slate-300 hover:bg-white/10"
+                      key={offset}
+                      onClick={() => toggleNotificationOffset(offset)}
+                      title={`Remove ${notificationOffsetLabel(offset)}`}
+                      type="button"
+                    >
+                      <span>{notificationTimeLabel(date, time, offset)}</span>
+                      <X size={12} />
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <label className="mt-3 block text-xs font-medium text-slate-300">
@@ -1415,6 +1594,7 @@ function DueAlert({
   popup: DuePopup;
 }) {
   const isAlarm = popup.item.itemType === "alarm";
+  const isPreAlert = popup.offsetMinutes > 0;
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-6">
@@ -1424,21 +1604,25 @@ function DueAlert({
             {isAlarm ? <AlarmClock size={22} /> : <Bell size={22} />}
           </div>
           <div className="min-w-0">
-            <p className="text-xs uppercase tracking-[0.14em] text-cyan-300">{isAlarm ? "Alarm" : "Reminder"}</p>
+            <p className="text-xs uppercase tracking-[0.14em] text-cyan-300">
+              {isPreAlert ? `${popup.offsetMinutes}m before` : isAlarm ? "Alarm" : "Reminder"}
+            </p>
             <h2 className="truncate text-xl font-semibold">{popup.item.title}</h2>
           </div>
         </div>
         {popup.item.notes ? <p className="mt-4 text-sm text-slate-300">{popup.item.notes}</p> : null}
-        <p className="mt-3 text-xs text-slate-500">{format(parseISO(popup.occurrenceIso), "EEE d MMM, HH:mm")}</p>
+        <p className="mt-3 text-xs text-slate-500">
+          Event time: {format(parseISO(popup.occurrenceIso), "EEE d MMM, HH:mm")}
+        </p>
 
-        <div className={`mt-5 grid gap-2 ${isAlarm ? "grid-cols-2" : "grid-cols-1"}`}>
-          {isAlarm ? (
+        <div className={`mt-5 grid gap-2 ${isAlarm && !isPreAlert ? "grid-cols-2" : "grid-cols-1"}`}>
+          {isAlarm && !isPreAlert ? (
             <button className="rounded-md bg-amber-300 px-4 py-2.5 text-sm font-semibold text-slate-950" onClick={onSnooze} type="button">
               Snooze
             </button>
           ) : null}
           <button className="rounded-md bg-cyan-300 px-4 py-2.5 text-sm font-semibold text-slate-950" onClick={onOk} type="button">
-            OK
+            {isPreAlert ? "Dismiss" : "OK"}
           </button>
         </div>
       </div>
@@ -1574,6 +1758,7 @@ function ScheduleList({
       ) : (
         items.map((reminder) => {
           const displayDueAt = now && mode === "active" ? nextOccurrence(reminder, now).toISOString() : reminder.dueAt;
+          const alertCount = normalizeNotificationOffsets(reminder.notificationOffsets).length;
           return (
           <article
             className="grid grid-cols-[auto_minmax(0,1fr)] gap-3 rounded-md border border-white/10 bg-white/[0.035] px-3 py-2 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center"
@@ -1603,6 +1788,9 @@ function ScheduleList({
                     </span>
                   ))}
                 <span className="text-xs text-slate-500">{format(parseISO(displayDueAt), "EEE d MMM, HH:mm")}</span>
+                <span className="rounded border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[11px] font-semibold text-slate-300">
+                  {alertCount} alert{alertCount === 1 ? "" : "s"}
+                </span>
               </div>
               <h3 className="mt-1 truncate text-base font-semibold">{reminder.title}</h3>
               {reminder.notes ? <p className="truncate text-xs text-slate-400">{reminder.notes}</p> : null}
