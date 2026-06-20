@@ -1,9 +1,21 @@
+import { Capacitor } from "@capacitor/core";
+import { LocalNotifications } from "@capacitor/local-notifications";
+import { addDays, addMinutes, addMonths, parseISO } from "date-fns";
 import { invoke } from "@tauri-apps/api/core";
-import type { ImportSummary, Reminder, ReminderInput, ReminderUpdate, TempoBackup } from "../shared/types";
+import type {
+  ImportSummary,
+  NotificationLeadTime,
+  NotificationLeadUnit,
+  Reminder,
+  ReminderInput,
+  ReminderUpdate,
+  TempoBackup,
+} from "../shared/types";
 import type { TempoSettings } from "../shared/types";
 import { browserStore } from "./browserStore";
 
 const browserSettingsKey = "tempo-assist-settings";
+const notificationChannelId = "tempo-assist-events";
 
 const defaultBrowserSettings: TempoSettings = {
   markdownDir: null,
@@ -77,6 +89,189 @@ async function tauriInvoke<T>(command: string, args?: Record<string, unknown>) {
   return invoke<T>(command, args);
 }
 
+const notificationUnitRank: Record<NotificationLeadUnit, number> = {
+  months: 5,
+  weeks: 4,
+  days: 3,
+  hours: 2,
+  minutes: 1,
+};
+
+function isNotificationLeadUnit(unit: unknown): unit is NotificationLeadUnit {
+  return typeof unit === "string" && unit in notificationUnitRank;
+}
+
+function normalizeNotificationLeadTimes(leadTimes?: NotificationLeadTime[] | null, offsets?: number[] | null) {
+  const source: Array<{ value: unknown; unit: unknown }> =
+    leadTimes && leadTimes.length > 0
+      ? leadTimes
+      : (offsets ?? [0]).map((offset) => ({ value: offset, unit: "minutes" as const }));
+  const seen = new Set<string>();
+  const normalized: NotificationLeadTime[] = [];
+
+  for (const leadTime of source) {
+    const value = Math.floor(Number(leadTime.value));
+    const unit = leadTime.unit;
+    if (!Number.isFinite(value) || value < 0 || !isNotificationLeadUnit(unit)) {
+      continue;
+    }
+
+    const key = `${value}:${unit}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      normalized.push({ value, unit });
+    }
+  }
+
+  normalized.sort((a, b) => notificationUnitRank[b.unit] - notificationUnitRank[a.unit] || b.value - a.value);
+  return normalized.length > 0 ? normalized : [{ value: 0, unit: "minutes" as const }];
+}
+
+function addOccurrence(date: Date, repeatRule: string) {
+  if (repeatRule === "hourly") {
+    return addMinutes(date, 60);
+  }
+  if (repeatRule === "daily") {
+    return addDays(date, 1);
+  }
+  if (repeatRule === "weekly") {
+    return addDays(date, 7);
+  }
+  if (repeatRule === "monthly") {
+    return addMonths(date, 1);
+  }
+  if (repeatRule === "yearly") {
+    const next = new Date(date);
+    next.setFullYear(next.getFullYear() + 1);
+    return next;
+  }
+  return date;
+}
+
+function nextOccurrence(reminder: Reminder, now: number) {
+  let occurrence = parseISO(reminder.dueAt);
+  if (!reminder.repeatRule || occurrence.getTime() > now) {
+    return occurrence;
+  }
+
+  let guard = 0;
+  while (occurrence.getTime() <= now && guard < 10_000) {
+    occurrence = addOccurrence(occurrence, reminder.repeatRule);
+    guard += 1;
+  }
+
+  return occurrence;
+}
+
+function alertDateForLeadTime(occurrence: Date, leadTime: NotificationLeadTime) {
+  if (leadTime.value === 0) {
+    return occurrence;
+  }
+  if (leadTime.unit === "months") {
+    return addMonths(occurrence, -leadTime.value);
+  }
+  if (leadTime.unit === "weeks") {
+    return addDays(occurrence, -leadTime.value * 7);
+  }
+  if (leadTime.unit === "days") {
+    return addDays(occurrence, -leadTime.value);
+  }
+  if (leadTime.unit === "hours") {
+    return addMinutes(occurrence, -leadTime.value * 60);
+  }
+  return addMinutes(occurrence, -leadTime.value);
+}
+
+function notificationLeadTimeLabel(leadTime: NotificationLeadTime) {
+  if (leadTime.value === 0) {
+    return "Due";
+  }
+
+  const unit = leadTime.value === 1 ? leadTime.unit.replace(/s$/, "") : leadTime.unit;
+  return `${leadTime.value} ${unit} before`;
+}
+
+function notificationId(key: string) {
+  let hash = 0;
+  for (let index = 0; index < key.length; index += 1) {
+    hash = ((hash << 5) - hash + key.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash) || 1;
+}
+
+async function ensureNotificationPermission() {
+  if (!Capacitor.isPluginAvailable("LocalNotifications")) {
+    return false;
+  }
+
+  const permissions = await LocalNotifications.checkPermissions();
+  if (permissions.display === "granted") {
+    return true;
+  }
+
+  const requested = await LocalNotifications.requestPermissions();
+  return requested.display === "granted";
+}
+
+async function syncNativeNotifications(reminders: Reminder[]) {
+  if (!Capacitor.isNativePlatform() || !(await ensureNotificationPermission())) {
+    return;
+  }
+
+  await LocalNotifications.createChannel({
+    id: notificationChannelId,
+    name: "Tempo Assist events",
+    description: "Reminders and alarms from Tempo Assist",
+    importance: 4,
+    visibility: 1,
+    vibration: true,
+  });
+
+  const pending = await LocalNotifications.getPending();
+  const tempoPending = pending.notifications.filter((notification) => notification.extra?.source === "tempo-assist");
+  if (tempoPending.length > 0) {
+    await LocalNotifications.cancel({ notifications: tempoPending.map(({ id }) => ({ id })) });
+  }
+
+  const now = Date.now();
+  const notifications = reminders
+    .filter((reminder) => reminder.status === "scheduled" || reminder.status === "snoozed")
+    .flatMap((reminder) => {
+      const occurrence = nextOccurrence(reminder, now);
+      if (Number.isNaN(occurrence.getTime())) {
+        return [];
+      }
+
+      return normalizeNotificationLeadTimes(reminder.notificationLeadTimes, reminder.notificationOffsets)
+        .map((leadTime) => ({ leadTime, at: alertDateForLeadTime(occurrence, leadTime) }))
+        .filter(({ at }) => at.getTime() > now)
+        .map(({ leadTime, at }) => {
+          const key = `${reminder.id}:${occurrence.toISOString()}:${leadTime.value}:${leadTime.unit}`;
+          const isDue = leadTime.value === 0;
+          return {
+            id: notificationId(key),
+            title: reminder.title || (reminder.itemType === "alarm" ? "Alarm" : "Reminder"),
+            body: isDue
+              ? reminder.notes || `${reminder.itemType === "alarm" ? "Alarm" : "Reminder"} due now`
+              : `${notificationLeadTimeLabel(leadTime)}: ${reminder.notes || "event upcoming"}`,
+            schedule: { at, allowWhileIdle: true },
+            channelId: notificationChannelId,
+            autoCancel: true,
+            extra: {
+              source: "tempo-assist",
+              reminderId: reminder.id,
+              occurrenceIso: occurrence.toISOString(),
+              leadTime,
+            },
+          };
+        });
+    });
+
+  if (notifications.length > 0) {
+    await LocalNotifications.schedule({ notifications });
+  }
+}
+
 export const reminderApi = {
   list: () => (isTauriRuntime() ? tauriInvoke<Reminder[]>("list_reminders") : browserStore.list()),
   create: (input: ReminderInput) =>
@@ -101,7 +296,7 @@ export const reminderApi = {
       isTauriRuntime() ? tauriInvoke<string | null>("choose_sound_file") : chooseBrowserSoundFile(),
   },
   notifications: {
-    sync: (_reminders: Reminder[]) => Promise.resolve(),
+    sync: syncNativeNotifications,
   },
   backup: {
     export: async () => {

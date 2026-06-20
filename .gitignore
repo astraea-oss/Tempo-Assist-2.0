@@ -2,5 +2,9 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+android/.gradle/
+android/app/build/
+android/build/
+android/capacitor-cordova-android-plugins/build/
 tempo-data/
 *.log

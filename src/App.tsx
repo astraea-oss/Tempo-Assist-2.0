@@ -1,3 +1,4 @@
+import { Capacitor } from "@capacitor/core";
 import {
   addDays,
   addMinutes,
@@ -381,7 +382,8 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    document.body.classList.remove("native-mobile");
+    document.body.classList.toggle("native-mobile", Capacitor.isNativePlatform());
+    return () => document.body.classList.remove("native-mobile");
   }, []);
 
   useEffect(() => {
